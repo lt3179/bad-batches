@@ -1,0 +1,38 @@
+name: Update recall data
+
+on:
+  schedule:
+    # 12:00 UTC daily (roughly 7-8am US Eastern depending on DST).
+    - cron: "0 12 * * *"
+  workflow_dispatch: {}  # lets you trigger a manual run from the Actions tab
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fetch recall data
+        run: python scripts/fetch_recalls.py
+
+      - name: Commit updated data
+        run: |
+          git config user.name "bad-batches-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add data/recalls.json
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Update recall data ($(date -u +%Y-%m-%d))"
+            git push
+          fi

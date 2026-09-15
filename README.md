@@ -16,8 +16,18 @@ that comes back as free text.
    `data/recalls.json`.
 3. A GitHub Action (`.github/workflows/update-recalls.yml`) runs that
    script once a day and commits the updated file.
-4. `index.html` / `app.js` / `style.css` are a static frontend (Leaflet
-   map) that reads `data/recalls.json` directly. No backend, no database.
+4. `index.html` / `app.js` / `style.css` are a static frontend that reads
+   `data/recalls.json` directly. No backend, no database.
+
+The map itself is a plain SVG built from `us-states-paths.json`, pre-generated
+from [us-atlas](https://github.com/topojson/us-atlas)'s topology-correct
+state boundaries (shared borders between neighbors, standard Albers USA
+projection). It's not rendered with a map library like Leaflet, on purpose,
+since the zoom/default-scale and cursor-follow panning behavior in `app.js`
+isn't something a map library's own pan/zoom controls are built for. If the
+map shapes ever need regenerating (e.g. picking up an updated us-atlas
+release), see `scripts/build_state_paths.js` and its `package.json` (dev-only
+tooling, not part of the runtime site or the daily Action).
 
 Region grouping is intentionally not a fixed map layer. Real food
 distribution doesn't follow static geographic regions, so the "which

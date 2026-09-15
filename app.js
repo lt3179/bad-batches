@@ -1,8 +1,14 @@
 /*
   Frontend for the recall map. Everything here is display logic: reading
   the already-normalized data/recalls.json (built by scripts/fetch_recalls.py)
-  and rendering it. No parsing or interpretation of raw agency text happens
-  in this file.
+  and the pre-computed state shapes in us-states-paths.json, then rendering
+  them. No parsing or interpretation of raw agency text happens in this file.
+
+  The map is a plain SVG built from us-atlas's topology-correct state
+  boundaries (see scripts/build_state_paths.js), not a map library. That's
+  intentional: it's what lets the zoom/pan-toward-cursor behavior below work
+  the way it does, which isn't something a standard map library's own
+  zoom/pan controls are built for.
 */
 
 const CENSUS_REGION = {
@@ -27,45 +33,46 @@ const REGION_COLOR = {
 
 const SEVERITY_RANK = { "Class I": 3, "Class II": 2, "Class III": 1 };
 const SEVERITY_COLOR = {
-  3: "#B3261E", // Class I
-  2: "#C97A1B", // Class II
-  1: "#3E6FA8", // Class III
-  0: "#C9CBC2", // no recalls in window
+  3: "var(--class-1)",
+  2: "var(--class-2)",
+  1: "var(--class-3)",
+  0: "var(--none)",
 };
 
-let state = {
+let appState = {
   recalls: [],
   window: "60", // "60" or "all"
   showRegions: false,
   selectedState: null,
-  geoLayer: null,
-  stateAbbrToLayer: {},
+  stateNames: {},
 };
+
+const svg = document.getElementById("map-svg");
+const ns = "http://www.w3.org/2000/svg";
 
 // ---------------------------------------------------------------------
 // Data loading
 // ---------------------------------------------------------------------
 
 async function loadData() {
-  const [geoRes, recallRes] = await Promise.all([
-    fetch("us-states.json"),
+  const [pathsRes, recallRes] = await Promise.all([
+    fetch("us-states-paths.json"),
     fetch("data/recalls.json"),
   ]);
-  const geo = await geoRes.json();
+  const pathsData = await pathsRes.json();
   const recallData = await recallRes.json();
 
-  state.recalls = recallData.recalls || [];
+  appState.recalls = recallData.recalls || [];
   const generated = recallData.generated_at;
   document.getElementById("last-updated").textContent = generated
     ? `Updated ${generated}, ${recallData.count} recalls tracked`
     : "Recall data unavailable";
 
-  return geo;
+  return pathsData;
 }
 
 function normalizeDateString(raw) {
   if (!raw) return null;
-  // Handles both FDA's YYYYMMDD and FSIS's likely YYYY-MM-DD.
   const digits = String(raw).replace(/-/g, "");
   if (digits.length !== 8) return null;
   const y = digits.slice(0, 4), m = digits.slice(4, 6), d = digits.slice(6, 8);
@@ -73,10 +80,10 @@ function normalizeDateString(raw) {
 }
 
 function recallsInWindow() {
-  if (state.window === "all") return state.recalls;
+  if (appState.window === "all") return appState.recalls;
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - 60);
-  return state.recalls.filter((r) => {
+  return appState.recalls.filter((r) => {
     const d = normalizeDateString(r.recall_date);
     return d && d >= cutoff;
   });
@@ -89,9 +96,8 @@ function recallsForState(abbr) {
 }
 
 function worstSeverityForState(abbr) {
-  const recalls = recallsForState(abbr);
   let worst = 0;
-  for (const r of recalls) {
+  for (const r of recallsForState(abbr)) {
     const rank = SEVERITY_RANK[r.classification] || 0;
     if (rank > worst) worst = rank;
   }
@@ -99,75 +105,84 @@ function worstSeverityForState(abbr) {
 }
 
 // ---------------------------------------------------------------------
-// Map
+// Map: build once, then just recolor on toggle changes
 // ---------------------------------------------------------------------
 
-function styleForFeature(feature) {
-  const abbr = feature.id;
-  if (state.showRegions) {
-    const region = CENSUS_REGION[abbr];
-    return {
-      fillColor: SEVERITY_COLOR[worstSeverityForState(abbr)],
-      fillOpacity: 0.85,
-      color: REGION_COLOR[region] || "#999",
-      weight: 2.5,
-    };
-  }
-  return {
-    fillColor: SEVERITY_COLOR[worstSeverityForState(abbr)],
-    fillOpacity: 0.85,
-    color: "#FFFFFF",
-    weight: 1,
-  };
+function buildMap(pathsData) {
+  svg.setAttribute("viewBox", pathsData.viewBox);
+  Object.entries(pathsData.states).forEach(([abbr, info]) => {
+    appState.stateNames[abbr] = info.name;
+
+    const path = document.createElementNS(ns, "path");
+    path.setAttribute("d", info.d);
+    path.setAttribute("class", "state-shape");
+    path.dataset.id = abbr;
+    path.addEventListener("click", () => selectState(abbr));
+
+    const title = document.createElementNS(ns, "title");
+    title.textContent = info.name;
+    path.appendChild(title);
+
+    svg.appendChild(path);
+  });
+
+  refreshMapStyles();
 }
 
 function refreshMapStyles() {
-  if (!state.geoLayer) return;
-  state.geoLayer.eachLayer((layer) => {
-    layer.setStyle(styleForFeature(layer.feature));
-    if (layer.feature.id === state.selectedState) {
-      layer.setStyle({ weight: 3, color: "#1B211E" });
+  svg.querySelectorAll(".state-shape").forEach((el) => {
+    const abbr = el.dataset.id;
+    el.setAttribute("fill", SEVERITY_COLOR[worstSeverityForState(abbr)]);
+
+    if (appState.showRegions) {
+      el.setAttribute("stroke", REGION_COLOR[CENSUS_REGION[abbr]] || "#999");
+      el.setAttribute("stroke-width", "2.5");
+    } else {
+      el.removeAttribute("stroke");
+      el.removeAttribute("stroke-width");
     }
+
+    el.classList.toggle("is-selected", abbr === appState.selectedState);
   });
 }
 
-function initMap(geo) {
-  const map = L.map("map", {
-    zoomControl: true,
-    minZoom: 3,
-    maxZoom: 6,
-  }).setView([39.5, -98.35], 4);
+// ---------------------------------------------------------------------
+// Default zoom, width squish, and cursor-follow panning
+// ---------------------------------------------------------------------
 
-  L.control.zoom({ position: "topright" }).addTo(map);
+const BASE_SCALE = 1.5 * 1.1 * 0.8;    // net of all the zoom tweaks so far
+const WIDTH_SQUISH = 0.8 * 1.1 * 1.1;  // net of all the width tweaks so far
+const PAN_EASE = 0.06 * 1.15;
+const PAN_FRACTION = 0.5;              // pan distance as a fraction of viewport size
 
-  state.geoLayer = L.geoJSON(geo, {
-    style: styleForFeature,
-    onEachFeature: (feature, layer) => {
-      state.stateAbbrToLayer[feature.id] = layer;
-      layer.on("mouseover", () => layer.setStyle({ weight: 2.5 }));
-      layer.on("mouseout", () => refreshMapStyles());
-      layer.on("click", () => selectState(feature.id, feature.properties.name));
-      layer.bindTooltip(feature.properties.name, { sticky: true });
-    },
-  }).addTo(map);
+let targetPan = { x: 0, y: 0 };
+let currentPan = { x: 0, y: 0 };
 
-  map.fitBounds(state.geoLayer.getBounds());
+window.addEventListener("mousemove", (e) => {
+  const nx = (e.clientX / window.innerWidth - 0.5) * 2;
+  const ny = (e.clientY / window.innerHeight - 0.5) * 2;
+  targetPan.x = -nx * window.innerWidth * PAN_FRACTION;
+  targetPan.y = -ny * window.innerHeight * PAN_FRACTION;
+});
+
+function tickPan() {
+  currentPan.x += (targetPan.x - currentPan.x) * PAN_EASE;
+  currentPan.y += (targetPan.y - currentPan.y) * PAN_EASE;
+  svg.style.transform = `scale(${(BASE_SCALE * WIDTH_SQUISH).toFixed(4)}, ${BASE_SCALE.toFixed(4)}) translate(${currentPan.x.toFixed(1)}px, ${currentPan.y.toFixed(1)}px)`;
+  requestAnimationFrame(tickPan);
 }
 
 // ---------------------------------------------------------------------
 // Detail panel
 // ---------------------------------------------------------------------
 
-function selectState(abbr, name) {
-  state.selectedState = abbr;
+function selectState(abbr) {
+  appState.selectedState = abbr;
   refreshMapStyles();
 
   const recalls = recallsForState(abbr);
-  document.getElementById("detail-empty").hidden = true;
-  const content = document.getElementById("detail-content");
-  content.hidden = false;
-
-  document.getElementById("detail-state-name").textContent = name;
+  document.getElementById("detail-card").classList.add("is-open");
+  document.getElementById("detail-state-name").textContent = appState.stateNames[abbr] || abbr;
   document.getElementById("detail-count").textContent =
     recalls.length === 0
       ? "No recalls in the selected window."
@@ -178,16 +193,22 @@ function selectState(abbr, name) {
   recalls
     .sort((a, b) => (b.recall_date || "").localeCompare(a.recall_date || ""))
     .forEach((r) => {
-      const li = document.createElement("li");
       const classNum = SEVERITY_RANK[r.classification] || 0;
-      li.className = `recall-card class-${classNum}`;
-      li.innerHTML = `
+      const card = document.createElement("div");
+      card.className = `recall-card class-${classNum}`;
+      card.innerHTML = `
         <p class="recall-card-title">${escapeHtml(r.title || "Untitled recall")}</p>
         <p class="recall-card-meta">${escapeHtml(r.firm || "")}${r.firm ? " &middot; " : ""}${escapeHtml(r.classification || "Unclassified")} &middot; ${formatDate(r.recall_date)}</p>
       `;
-      li.addEventListener("click", () => openModal(r));
-      list.appendChild(li);
+      card.addEventListener("click", () => openModal(r));
+      list.appendChild(card);
     });
+}
+
+function closeDetailPanel() {
+  document.getElementById("detail-card").classList.remove("is-open");
+  appState.selectedState = null;
+  refreshMapStyles();
 }
 
 function formatDate(raw) {
@@ -203,7 +224,7 @@ function escapeHtml(str) {
 }
 
 // ---------------------------------------------------------------------
-// Modal ("same batch" view)
+// "Same batch" modal
 // ---------------------------------------------------------------------
 
 function openModal(recall) {
@@ -229,6 +250,20 @@ function openModal(recall) {
     fields.appendChild(dd);
   });
 
+  if (recall.url) {
+    const dt = document.createElement("dt");
+    dt.textContent = "Source";
+    const dd = document.createElement("dd");
+    const a = document.createElement("a");
+    a.href = recall.url;
+    a.target = "_blank";
+    a.rel = "noopener";
+    a.textContent = "Official recall notice";
+    dd.appendChild(a);
+    fields.appendChild(dt);
+    fields.appendChild(dd);
+  }
+
   const statesList = document.getElementById("modal-states-list");
   statesList.innerHTML = "";
   const states = recall.nationwide ? ["Nationwide"] : (recall.states || []);
@@ -243,17 +278,6 @@ function openModal(recall) {
     });
   }
 
-  const linkRow = document.createElement("div");
-  if (recall.url) {
-    const a = document.createElement("a");
-    a.href = recall.url;
-    a.target = "_blank";
-    a.rel = "noopener";
-    a.textContent = "View official recall notice";
-    linkRow.appendChild(a);
-    fields.appendChild(linkRow);
-  }
-
   document.getElementById("recall-modal").hidden = false;
 }
 
@@ -262,39 +286,42 @@ function closeModal() {
 }
 
 // ---------------------------------------------------------------------
-// Toolbar
+// Toolbar + keyboard shortcuts
 // ---------------------------------------------------------------------
 
-function initToolbar() {
+function initControls() {
   document.querySelectorAll("[data-window]").forEach((btn) => {
     btn.addEventListener("click", () => {
       document.querySelectorAll("[data-window]").forEach((b) => b.classList.remove("is-active"));
       btn.classList.add("is-active");
-      state.window = btn.dataset.window;
+      appState.window = btn.dataset.window;
       refreshMapStyles();
-      if (state.selectedState) {
-        const name = state.stateAbbrToLayer[state.selectedState]?.feature?.properties?.name;
-        selectState(state.selectedState, name);
-      }
+      if (appState.selectedState) selectState(appState.selectedState);
     });
   });
 
   document.getElementById("region-toggle").addEventListener("change", (e) => {
-    state.showRegions = e.target.checked;
+    appState.showRegions = e.target.checked;
     refreshMapStyles();
   });
 
+  document.getElementById("detail-close").addEventListener("click", closeDetailPanel);
   document.getElementById("recall-modal-close").addEventListener("click", closeModal);
   document.getElementById("recall-modal-backdrop").addEventListener("click", closeModal);
+
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") closeModal();
+    if ((e.key === "e" || e.key === "E") && document.getElementById("recall-modal").hidden) {
+      closeDetailPanel();
+    }
   });
 }
 
 // ---------------------------------------------------------------------
 
 (async function main() {
-  initToolbar();
-  const geo = await loadData();
-  initMap(geo);
+  initControls();
+  const pathsData = await loadData();
+  buildMap(pathsData);
+  tickPan();
 })();

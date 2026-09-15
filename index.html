@@ -4,68 +4,50 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Bad Batches: US food recall map</title>
-<link rel="stylesheet" href="vendor/leaflet/leaflet.css" />
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
-<header class="site-header">
-  <div class="site-header-inner">
-    <div class="brand">
-      <span class="brand-mark" aria-hidden="true"></span>
-      <div>
-        <h1>Bad Batches</h1>
-        <p class="tagline">Know if a bad batch reached your state. FDA and USDA/FSIS recalls, updated daily.</p>
-      </div>
-    </div>
-    <div class="header-meta">
-      <span id="last-updated">Loading recall data&hellip;</span>
-    </div>
+<div class="map-stage" id="map-stage">
+  <svg viewBox="-68 2 1036 614" id="map-svg" aria-label="Map of US states, click a state to see its recalls"></svg>
+</div>
+
+<div class="overlay-card title-card">
+  <div>
+    <h1>Bad Batches</h1>
+    <p>Check for any recalls/warnings in your state</p>
   </div>
-</header>
+</div>
 
-<main class="layout">
+<div class="overlay-card toolbar-card">
+  <button class="toolbar-btn is-active" data-window="60">Last 60 days</button>
+  <button class="toolbar-btn" data-window="all">Full history</button>
+  <div class="toolbar-divider"></div>
+  <label class="toolbar-toggle">
+    <input type="checkbox" id="region-toggle">
+    Regions
+  </label>
+</div>
 
-  <section class="map-panel">
-    <div class="toolbar">
-      <div class="toolbar-group" role="group" aria-label="Time window">
-        <button class="toolbar-btn is-active" data-window="60">Last 60 days</button>
-        <button class="toolbar-btn" data-window="all">Full history</button>
-      </div>
-      <div class="toolbar-group" role="group" aria-label="Overlay">
-        <label class="toolbar-toggle">
-          <input type="checkbox" id="region-toggle">
-          <span>Show region boundaries</span>
-        </label>
-      </div>
-    </div>
+<div class="overlay-card legend-card">
+  <span class="legend-title">Recall severity</span>
+  <span class="legend-item"><i class="swatch swatch-1"></i>Class I, serious risk</span>
+  <span class="legend-item"><i class="swatch swatch-2"></i>Class II, moderate risk</span>
+  <span class="legend-item"><i class="swatch swatch-3"></i>Class III, low risk</span>
+  <span class="legend-item"><i class="swatch swatch-none"></i>No recalls in window</span>
+</div>
 
-    <div id="map" aria-label="Map of US states, click a state to see its recalls"></div>
+<div class="credit-line" id="last-updated">Loading recall data&hellip;</div>
 
-    <div class="legend">
-      <span class="legend-title">Recall severity</span>
-      <span class="legend-item"><i class="swatch swatch-class-1"></i>Class I: serious health risk</span>
-      <span class="legend-item"><i class="swatch swatch-class-2"></i>Class II: temporary or reversible risk</span>
-      <span class="legend-item"><i class="swatch swatch-class-3"></i>Class III: unlikely to cause harm</span>
-      <span class="legend-item"><i class="swatch swatch-none"></i>No recalls in window</span>
-    </div>
-  </section>
-
-  <aside class="detail-panel" id="detail-panel">
-    <div class="detail-empty" id="detail-empty">
-      <p>Click your state on the map to see what to look out for in grocery stores near you.</p>
-    </div>
-
-    <div class="detail-content" id="detail-content" hidden>
-      <h2 id="detail-state-name">State</h2>
-      <p class="detail-count" id="detail-count"></p>
-      <ul class="recall-list" id="recall-list"></ul>
-    </div>
-  </aside>
-
-</main>
+<div class="overlay-card detail-card" id="detail-card">
+  <button class="detail-close" id="detail-close">&times;</button>
+  <span class="detail-close-hint">or press E</span>
+  <h2 id="detail-state-name">State</h2>
+  <p class="detail-count" id="detail-count"></p>
+  <div id="recall-list"></div>
+</div>
 
 <div class="recall-modal" id="recall-modal" hidden>
   <div class="recall-modal-backdrop" id="recall-modal-backdrop"></div>
@@ -81,18 +63,6 @@
   </div>
 </div>
 
-<footer class="site-footer">
-  <p>
-    Data pulled directly from the
-    <a href="https://open.fda.gov/apis/food/enforcement/" target="_blank" rel="noopener">openFDA Food Enforcement API</a>
-    and the
-    <a href="https://www.fsis.usda.gov/science-data/developer-resources/recall-api" target="_blank" rel="noopener">USDA/FSIS Recall API</a>,
-    refreshed daily. State matching is done with fixed lookup rules, not a model. See the
-    <a href="https://github.com/" target="_blank" rel="noopener" id="repo-link">source</a> for details.
-  </p>
-</footer>
-
-<script src="vendor/leaflet/leaflet.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

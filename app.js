@@ -32,12 +32,21 @@ const REGION_COLOR = {
 };
 
 const SEVERITY_RANK = { "Class I": 3, "Class II": 2, "Class III": 1 };
-const SEVERITY_COLOR = {
-  3: "var(--class-1)",
-  2: "var(--class-2)",
-  1: "var(--class-3)",
-  0: "var(--none)",
+
+// Full-saturation hex per severity, used as the "most urgent" end of the
+// recency/status gradient below. Keep in sync with the --class-* vars in
+// style.css if those ever change.
+const SEVERITY_HEX = {
+  3: [0xB3, 0x26, 0x1E],
+  2: [0xD5, 0x96, 0x4D],
+  1: [0x69, 0x8F, 0xBB],
 };
+const NONE_HEX = [0xD2, 0xD3, 0xCB];
+
+// Fixed decay window for the recency gradient, independent of the
+// 60-day/all-history toggle: a recall from 3 years ago in "all history"
+// mode should still read as fully faded, not fully bright.
+const RECENCY_WINDOW_DAYS = 60;
 
 let appState = {
   recalls: [],
@@ -95,13 +104,162 @@ function recallsForState(abbr) {
   );
 }
 
-function worstSeverityForState(abbr) {
-  let worst = 0;
-  for (const r of recallsForState(abbr)) {
-    const rank = SEVERITY_RANK[r.classification] || 0;
-    if (rank > worst) worst = rank;
+// Returns up to n recalls touching this state, worst severity first and
+// most recent first within a severity tier. Drives both the base fill
+// (top[0]) and the two accent dots (top[1], top[2]).
+function topRecallsForState(abbr, n = 3) {
+  const list = recallsForState(abbr).slice();
+  list.sort((a, b) => {
+    const ra = SEVERITY_RANK[a.classification] || 0;
+    const rb = SEVERITY_RANK[b.classification] || 0;
+    if (rb !== ra) return rb - ra;
+    const da = normalizeDateString(a.recall_date);
+    const db = normalizeDateString(b.recall_date);
+    return (db ? db.getTime() : 0) - (da ? da.getTime() : 0);
+  });
+  return list.slice(0, n);
+}
+
+function lightenMix(rgb, t = 0.82) {
+  return rgb.map((c) => Math.round(c + (255 - c) * t));
+}
+
+function lerpRGB(a, b, t) {
+  return a.map((c, i) => Math.round(c + (b[i] - c) * t));
+}
+
+function toHex(rgb) {
+  return "#" + rgb.map((c) => Math.max(0, Math.min(255, c)).toString(16).padStart(2, "0")).join("");
+}
+
+// Base fill color for a state: hue = worst severity touching it, shade =
+// how recent that recall is and whether it's still Ongoing. A resolved
+// Class I recall from 55 days ago fades toward pale red; a fresh, still-
+// active one stays near full saturation. Floor of ~0.15 so nothing goes
+// fully invisible.
+function stateFillColor(abbr) {
+  const top = topRecallsForState(abbr, 1)[0];
+  if (!top) return toHex(NONE_HEX);
+  const rank = SEVERITY_RANK[top.classification] || 0;
+  if (!rank) return toHex(NONE_HEX);
+
+  const full = SEVERITY_HEX[rank];
+  const light = lightenMix(full);
+  const d = normalizeDateString(top.recall_date);
+  const days = d ? Math.max(0, (Date.now() - d.getTime()) / 86400000) : RECENCY_WINDOW_DAYS;
+  const recency = Math.max(0, Math.min(1, 1 - days / RECENCY_WINDOW_DAYS));
+  const statusFactor = top.status === "Ongoing" ? 1 : 0.55;
+  const intensity = Math.max(0, Math.min(1, 0.15 + 0.85 * recency * statusFactor));
+
+  return toHex(lerpRGB(light, full, intensity));
+}
+
+// ---------------------------------------------------------------------
+// Corner accent placement (2nd/3rd most relevant recall per state)
+// ---------------------------------------------------------------------
+//
+// State paths are straight-line polygons (M/L/Z only, no curves), often
+// multiple subpaths per state (e.g. Michigan's two peninsulas, Hawaii's
+// islands). We anchor accents to the largest subpolygon by area so dots
+// don't land in a gap between landmasses, then nudge toward that
+// subpolygon's centroid until they're confirmed inside it.
+
+function parseSubpaths(d) {
+  return d
+    .split(/Z/i)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((s) =>
+      s
+        .replace(/^M/, "")
+        .split("L")
+        .map((pair) => pair.split(",").map(Number))
+        .filter((p) => p.length === 2 && !Number.isNaN(p[0]) && !Number.isNaN(p[1]))
+    )
+    .filter((pts) => pts.length >= 3);
+}
+
+function polygonArea(pts) {
+  let a = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const [x1, y1] = pts[i];
+    const [x2, y2] = pts[(i + 1) % pts.length];
+    a += x1 * y2 - x2 * y1;
   }
-  return worst;
+  return a / 2;
+}
+
+function polygonCentroid(pts) {
+  let cx = 0, cy = 0, a = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const [x1, y1] = pts[i];
+    const [x2, y2] = pts[(i + 1) % pts.length];
+    const cross = x1 * y2 - x2 * y1;
+    a += cross;
+    cx += (x1 + x2) * cross;
+    cy += (y1 + y2) * cross;
+  }
+  a *= 0.5;
+  if (Math.abs(a) < 1e-9) {
+    const n = pts.length;
+    return [pts.reduce((s, p) => s + p[0], 0) / n, pts.reduce((s, p) => s + p[1], 0) / n];
+  }
+  return [cx / (6 * a), cy / (6 * a)];
+}
+
+function pointInPolygon([px, py], pts) {
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const [xi, yi] = pts[i];
+    const [xj, yj] = pts[j];
+    const intersect = yi > py !== yj > py && px < ((xj - xi) * (py - yi)) / (yj - yi) + xi;
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+function dominantSubpolygon(d) {
+  const subs = parseSubpaths(d);
+  if (subs.length === 0) return null;
+  let best = subs[0];
+  let bestArea = Math.abs(polygonArea(subs[0]));
+  for (const s of subs.slice(1)) {
+    const a = Math.abs(polygonArea(s));
+    if (a > bestArea) {
+      bestArea = a;
+      best = s;
+    }
+  }
+  return best;
+}
+
+// Returns { p1, p2, r } in state-path coordinates, or null if the path
+// couldn't be parsed. p1/p2 are guaranteed inside the dominant subpolygon.
+function computeAccentAnchors(d) {
+  const poly = dominantSubpolygon(d);
+  if (!poly) return null;
+
+  const xs = poly.map((p) => p[0]);
+  const ys = poly.map((p) => p[1]);
+  const minx = Math.min(...xs), maxx = Math.max(...xs);
+  const miny = Math.min(...ys), maxy = Math.max(...ys);
+  const w = maxx - minx, h = maxy - miny;
+  const centroid = polygonCentroid(poly);
+  const r = Math.max(3, Math.min(7, 0.12 * Math.min(w, h)));
+
+  function nudgeInside(pt) {
+    let p = pt.slice();
+    let tries = 0;
+    while (!pointInPolygon(p, poly) && tries < 12) {
+      p = [p[0] + (centroid[0] - p[0]) * 0.25, p[1] + (centroid[1] - p[1]) * 0.25];
+      tries++;
+    }
+    return p;
+  }
+
+  const p1 = nudgeInside([maxx - 0.16 * w, miny + 0.18 * h]);
+  const p2 = nudgeInside([p1[0], p1[1] + r * 2.6]);
+  return { p1, p2, r };
 }
 
 // ---------------------------------------------------------------------
@@ -124,6 +282,22 @@ function buildMap(pathsData) {
     path.appendChild(title);
 
     svg.appendChild(path);
+
+    // Corner accent dots for the 2nd/3rd most relevant recall. Anchor
+    // positions are fixed per state shape, so compute once here rather
+    // than on every refresh.
+    const anchors = computeAccentAnchors(info.d);
+    [1, 2].forEach((tier) => {
+      const dot = document.createElementNS(ns, "circle");
+      dot.setAttribute("class", `accent-dot accent-${tier}`);
+      dot.dataset.id = abbr;
+      const pt = anchors ? (tier === 1 ? anchors.p1 : anchors.p2) : [0, 0];
+      dot.setAttribute("cx", pt[0]);
+      dot.setAttribute("cy", pt[1]);
+      dot.setAttribute("r", anchors ? anchors.r * (tier === 1 ? 1 : 0.82) : 0);
+      dot.setAttribute("opacity", "0");
+      svg.appendChild(dot);
+    });
   });
 
   refreshMapStyles();
@@ -132,7 +306,7 @@ function buildMap(pathsData) {
 function refreshMapStyles() {
   svg.querySelectorAll(".state-shape").forEach((el) => {
     const abbr = el.dataset.id;
-    el.setAttribute("fill", SEVERITY_COLOR[worstSeverityForState(abbr)]);
+    el.setAttribute("fill", stateFillColor(abbr));
 
     if (appState.showRegions) {
       el.setAttribute("stroke", REGION_COLOR[CENSUS_REGION[abbr]] || "#999");
@@ -143,6 +317,20 @@ function refreshMapStyles() {
     }
 
     el.classList.toggle("is-selected", abbr === appState.selectedState);
+
+    const top3 = topRecallsForState(abbr, 3);
+    [1, 2].forEach((tier) => {
+      const dot = svg.querySelector(`circle.accent-${tier}[data-id="${abbr}"]`);
+      if (!dot) return;
+      const recall = top3[tier]; // tier 1 -> index 1 (2nd recall), tier 2 -> index 2 (3rd)
+      if (!recall) {
+        dot.setAttribute("opacity", "0");
+        return;
+      }
+      const rank = SEVERITY_RANK[recall.classification] || 0;
+      dot.setAttribute("fill", toHex(SEVERITY_HEX[rank] || NONE_HEX));
+      dot.setAttribute("opacity", "1");
+    });
   });
 }
 

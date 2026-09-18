@@ -64,6 +64,15 @@ a:hover { color: var(--brand); }
   stroke-width: 2.2;
 }
 
+/* Corner accent dots: 2nd/3rd most relevant recall per state. Never
+   intercept clicks -- the state shape underneath stays the hit target. */
+.accent-dot {
+  stroke: var(--paper);
+  stroke-width: 0.8;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
 /* ---------- floating overlay cards ---------- */
 
 .overlay-card {
